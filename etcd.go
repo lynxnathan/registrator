@@ -1,7 +1,6 @@
 package main
 
 import (
-	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -21,33 +20,60 @@ func NewEtcdRegistry(uri *url.URL) ServiceRegistry {
 	}
 	return &EtcdRegistry{client: etcd.NewClient(urls), path: uri.Path}
 }
-
-func (r *EtcdRegistry) registerdomains(service *Service) {
-	log.Println("Called registerdomains")
-	path := r.path + "/" + service.Name + "/" + service.ID + "/domains"
-	if val, prs := service.Attrs["domains"]; prs {
-		domains := strings.Split(val, ",")
-		if len(domains) > 0 {
-			log.Println("Domains:", domains)
-			r.client.SetDir(path, uint64(0))
-			for _, domain := range domains {
-				_, err := r.client.Set(path + "/" + domain, domain, uint64(0))
-				if err != nil {
-					log.Println("Unable to create domain:", err)
+// TODO: Fix this mess when conscious
+func (r *EtcdRegistry) registerattributes(service *Service) {
+	log.Println("Called registerattributes with", service.Attrs)
+	base_path := r.path + "/" + service.Name + "/" + service.ID
+	if mode, prs := service.Attrs["mode"]; prs {
+		mode = strings.ToLower(mode)
+		if mode != "http" && mode != "tcp" {
+			log.Println("Unknown mode requested, defaulting to TCP")
+			mode = "tcp"
+		}
+		log.Println("Setting network mode", mode, "for service", service.Name)
+		_, err := r.client.Set(base_path+"/mode", mode, uint64(0))
+		if err != nil {
+			log.Println("Unable to set network mode:", err, "ignoring service.")
+			return
+		}
+		if val, prs := service.Attrs["external_port"]; prs && mode == "tcp" {
+			_, err := r.client.Set(base_path+"/external_port", val, uint64(0))
+			if err != nil {
+				log.Println("Unable to set external port:", err)
+			}
+		} else if val, prs := service.Attrs["internal_port"]; prs && mode == "tcp" {
+			_, err := r.client.Set(base_path+"/internal_port", val, uint64(0))
+			if err != nil {
+				log.Println("Unable to set internal port:", err)
+			}
+		}
+		if val, prs := service.Attrs["domains"]; prs && mode == "http" {
+			domains := strings.Split(val, ",")
+			if len(domains) > 0 {
+				log.Println("Domains:", domains)
+				r.client.SetDir(base_path+"/domains", uint64(0))
+				for _, domain := range domains {
+					_, err := r.client.Set(base_path+"/domains/"+domain, domain, uint64(0))
+					if err != nil {
+						log.Println("Unable to create domain:", err)
+					}
 				}
 			}
 		}
+	} else {
+		log.Println("Service mode not specified, default to TCP for service", service.Name)
+		r.client.Set(base_path+"/mode", "tcp", uint64(0))
 	}
 }
 
 func (r *EtcdRegistry) Register(service *Service) error {
 	log.Println("register called for:", service.Name)
-	path := r.path + "/" + service.Name + "/" + service.ID + "/endpoint"
-	r.registerdomains(service)
+	base_path := r.path + "/" + service.Name + "/" + service.ID
+	r.registerattributes(service)
 	port := strconv.Itoa(service.Port)
-	addr := net.JoinHostPort(service.IP, port)
-	_, err := r.client.Set(path, addr, uint64(0))
-	return err
+	r.client.Set(base_path+"/port", port, uint64(0))
+	r.client.Set(base_path+"/address", service.IP, uint64(0))
+	return nil
 }
 
 func (r *EtcdRegistry) Deregister(service *Service) error {
